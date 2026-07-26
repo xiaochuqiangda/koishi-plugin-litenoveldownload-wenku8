@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-litenoveldownload-wenku8",
-  "description": "基于轻小说文库（wenku8.net）网站提供的轻小说搜索与下载服务 ",
-  "version": "0.0.6",
+  "description": "基于轻小说文库（wenku8.net）网站提供的轻小说搜索与下载服务,onebot适配",
+  "version": "0.1.0",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -9,6 +9,11 @@
     "dist"
   ],
   "license": "MIT",
+  "homepage": "https://github.com/xiaochuqiangda/koishi-plugin-litenoveldownload-wenku8",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xiaochuqiangda/koishi-plugin-litenoveldownload-wenku8.git"
+  },
   "keywords": [
     "chatbot",
     "koishi",

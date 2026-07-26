@@ -7,6 +7,18 @@ import * as path from 'path'
 
 export const name = 'wenku8-search'
 
+export const inject = ['database']
+
+declare module 'koishi' {
+  interface Tables {
+    wenku8_blacklist: Wenku8Blacklist
+  }
+}
+
+export interface Wenku8Blacklist {
+  userId: string
+}
+
 export interface Config {
   username: string
   password: string
@@ -16,6 +28,9 @@ export interface Config {
   timeout: number
   useForward: boolean
   maxCache: number
+  oneToOne: boolean
+  requireReply: boolean
+  adminQQ: string
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -30,8 +45,11 @@ export const Config: Schema<Config> = Schema.object({
   ]).default('lastupdate').description('默认排序方式'),
   downloadPath: Schema.string().default('./wenku8-downloads').description('下载文件保存路径'),
   timeout: Schema.number().default(60).description('搜索状态超时时间（秒）'),
-  useForward: Schema.boolean().default(false).description('是否使用合并转发消息展示搜索结果（需 NapCat 支持）'),
-  maxCache: Schema.number().default(5).description('缓存文件数量上限，超出将删除最旧的文件'),
+  useForward: Schema.boolean().default(false).description('是否使用合并转发消息展示搜索结果'),
+  maxCache: Schema.number().default(5).description('缓存文件数量上限'),
+  oneToOne: Schema.boolean().default(true).description('一对一模式：仅搜索发起者可操作。关闭后任何人都能操作你的搜索结果'),
+  requireReply: Schema.boolean().default(false).description('要求回复机器人消息：开启后用户需引用（回复）机器人的搜索结果才能操作。建议配合一对一使用'),
+  adminQQ: Schema.string().default('').description('管理员QQ号，只有管理员可以使用黑名单管理指令'),
 })
 
 interface BookInfo {
@@ -45,10 +63,24 @@ interface BookInfo {
   detailUrl: string
 }
 
-export function apply(ctx: Context, config: Config) {
+export async function apply(ctx: Context, config: Config) {
   const logger = ctx.logger('wenku8')
   let cookieJar = ''
   let isLoggedIn = false
+
+  // 初始化黑名单表
+  ctx.model.extend('wenku8_blacklist', {
+    userId: 'string',
+  }, { primary: 'userId' })
+
+  // 从数据库加载黑名单
+  const blacklistSet = new Set<string>()
+  try {
+    const dbBlacklist = await ctx.database.get('wenku8_blacklist', {})
+    dbBlacklist.forEach(row => blacklistSet.add(row.userId))
+  } catch (e) {
+    logger.warn('加载黑名单失败:', e)
+  }
 
   function gbkEncode(str: string): string {
     const buf = iconv.encode(str, 'gbk')
@@ -243,6 +275,8 @@ export function apply(ctx: Context, config: Config) {
     msg += '回复「下载+序号」下载对应书籍\n'
     if (currentPage < totalPage) msg += '回复「下一页」查看下一页\n'
     if (currentPage > 1) msg += '回复「上一页」查看上一页\n'
+    msg += `回复「页数X」跳转至第X页（1~${totalPage}）
+`
     msg += '回复「取消」退出搜索'
     return msg
   }
@@ -263,6 +297,8 @@ export function apply(ctx: Context, config: Config) {
     let tip = '回复「下载+序号」下载对应书籍\n'
     if (currentPage < totalPage) tip += '回复「下一页」查看下一页\n'
     if (currentPage > 1) tip += '回复「上一页」查看上一页\n'
+    tip += `回复「页数X」跳转至第X页（1~${totalPage}）
+`
     tip += '回复「取消」退出搜索'
     texts.push(tip)
 
@@ -412,7 +448,7 @@ export function apply(ctx: Context, config: Config) {
 
   // ==================== 交互循环 ====================
 
-  async function interact(session: any, searchType: 'title' | 'tag' | 'list', keyword: string, sort: string, page: number) {
+    async function interact(session: any, searchType: 'title' | 'tag' | 'list', keyword: string, sort: string, page: number) {
     let currentPage = page
     let totalPage = 1
     let books: BookInfo[] = []
@@ -429,8 +465,29 @@ export function apply(ctx: Context, config: Config) {
     await sendResults(session, books, currentPage, totalPage, searchType, sort)
 
     // prompt 交互循环
+        // prompt 交互循环
     while (true) {
-      const input = await session.prompt(config.timeout * 1000)
+      let input: string | undefined
+
+      if (config.oneToOne && !config.requireReply) {
+        // 一对一 + 不要求回复：只监听发起者，不吞其他人消息
+        input = await session.prompt(config.timeout * 1000)
+      } else {
+        // 其他情况：全频道监听（会拦截该频道所有消息直到匹配或超时）
+        const replySession = await session.prompt((sess: any) => {
+          // 一对一：过滤非发起者
+          if (config.oneToOne && sess.userId !== session.userId) return false
+          // 要求回复：过滤非回复机器人消息
+          if (config.requireReply) {
+            if (!sess.quote) return false
+            const quotedUserId = sess.quote.userId ?? sess.quote.author?.id
+            if (String(quotedUserId) !== String(session.bot.selfId)) return false
+          }
+          return true
+        }, config.timeout * 1000)
+        input = replySession?.content
+      }
+
       if (input === undefined) {
         await session.send('搜索已超时，任务已自动取消。')
         return
@@ -466,7 +523,26 @@ export function apply(ctx: Context, config: Config) {
         continue
       }
 
-            const dlMatch = trimmed.match(/^(?:下载|dl)\s*(\d+)$/)
+      // 页数指定跳转：支持 "页数2"、"第2页"、"page 2"、"p 2"、"2"
+      const pageJumpMatch = trimmed.match(/^(?:页数\s*|第\s*|page\s*|p\s*)?(\d+)(?:\s*页)?$/i)
+      if (pageJumpMatch) {
+        const targetPage = parseInt(pageJumpMatch[1])
+        if (targetPage === currentPage) {
+          await session.send(`当前已在第 ${targetPage} 页。`)
+          continue
+        }
+        if (targetPage < 1 || targetPage > totalPage) {
+          await session.send(`页码超出范围，请输入 1~${totalPage} 之间的页码。`)
+          continue
+        }
+        const result = await fetchBooks(searchType, keyword, sort, targetPage)
+        if (typeof result === 'string') { await session.send(result); return }
+        books = result.books; currentPage = result.currentPage; totalPage = result.totalPage
+        await sendResults(session, books, currentPage, totalPage, searchType, sort)
+        continue
+      }
+
+      const dlMatch = trimmed.match(/^(?:下载|dl)\s*(\d+)$/)
       if (dlMatch) {
         const idx = parseInt(dlMatch[1]) - 1
         if (idx < 0 || idx >= books.length) {
@@ -475,14 +551,18 @@ export function apply(ctx: Context, config: Config) {
         }
         const msg = await doDownload(session, books[idx])
         await session.send(msg)
-        // 只有真正下载成功才结束会话，失败继续等待
         if (msg.includes('下载完成')) return
         continue
       }
-      await session.send('无效指令，请回复「下载+序号」「下一页」「上一页」或「取消」。')
+
+      if (config.requireReply) {
+        await session.send('无效指令，请回复「下载+序号」「下一页」「上一页」或「取消」。\n注意：需要先引用（回复）机器人的消息再发送指令。')
+      } else {
+        await session.send('无效指令，请回复「下载+序号」「下一页」「上一页」或「取消」。')
+      }
     }
   }
-
+  
   // ==================== 指令注册 ====================
 
   const cmd = ctx.command(`${config.commandName} [...rest]`, '轻小说文库搜索与下载')
@@ -496,33 +576,134 @@ ${config.commandName} list — 按默认排序浏览`)
 
   cmd.action(async ({ session }, ...rest) => {
     if (!session) return '会话异常，请重试。'
-    const input = rest.join(' ').trim()
 
-    if (!input) {
+    // 黑名单检查
+    if (blacklistSet.has(String(session.userId))) {
+      return '你已被列入黑名单，无法使用此插件。'
+    }
+
+    const rawInput = rest.join(' ').trim()
+
+    if (!rawInput) {
       return `请输入搜索内容。用法：
-${config.commandName} <关键词> — 按标题搜索
-${config.commandName} tag <标签> — 按标签搜索
-${config.commandName} list — 按默认排序浏览`
+${config.commandName} <关键词> [更新|热门|完结|动画化] — 按标题搜索
+${config.commandName} tag <标签> [更新|热门|完结|动画化] — 按标签搜索
+${config.commandName} list [更新|热门|完结|动画化] — 按默认排序浏览`
     }
 
     if (!(await ensureLogin())) {
       return '登录失败，请检查账号密码。'
     }
 
-    if (input.startsWith('tag ')) {
-      const tag = input.slice(4).trim()
-      if (!tag) return '请输入标签名。'
-      await interact(session, 'tag', tag, '', 1)
+    // 排序关键词映射
+    const sortMap: Record<string, string> = {
+      '更新': 'lastupdate',
+      '热门': 'allvisit',
+      '完结': 'fullflag',
+      '动画化': 'anime',
+    }
+
+    // 解析输入，提取可能的排序后缀
+    function parseInput(input: string): { keyword: string; sort: string } {
+      const parts = input.split(/\s+/)
+      const last = parts[parts.length - 1]
+      if (sortMap[last]) {
+        return { keyword: parts.slice(0, -1).join(' '), sort: sortMap[last] }
+      }
+      return { keyword: input, sort: config.defaultSort }
+    }
+
+    if (rawInput.startsWith('tag ')) {
+      const afterTag = rawInput.slice(4).trim()
+      const { keyword, sort } = parseInput(afterTag)
+      if (!keyword) return '请输入标签名。'
+      await interact(session, 'tag', keyword, sort, 1)
       return
     }
 
-    if (input === 'list') {
-      await interact(session, 'list', '', config.defaultSort, 1)
+    if (rawInput === 'list' || rawInput.startsWith('list ')) {
+      const afterList = rawInput === 'list' ? '' : rawInput.slice(5).trim()
+      const { keyword: _, sort } = parseInput(afterList || 'list')
+      await interact(session, 'list', '', sort, 1)
       return
     }
 
-    await interact(session, 'title', input, '', 1)
+    const { keyword, sort } = parseInput(rawInput)
+    await interact(session, 'title', keyword, sort, 1)
+  })
+
+
+  // ==================== 管理员指令：黑名单管理 ====================
+
+  const blacklistCmd = ctx.command(`${config.commandName}.blacklist <action:string> <qq:string>`, '黑名单管理（管理员）')
+    .usage(`用法：
+${config.commandName}.blacklist add <QQ号> — 将用户加入黑名单
+${config.commandName}.blacklist remove <QQ号> — 将用户移出黑名单`)
+    .example(`${config.commandName}.blacklist add 123456789`)
+    .example(`${config.commandName}.blacklist remove 123456789`)
+
+  blacklistCmd.action(async ({ session }, action, qq) => {
+    if (!session) return '会话异常，请重试。'
+    if (!config.adminQQ || String(session.userId) !== String(config.adminQQ)) {
+      return '你没有权限执行此操作。'
+    }
+    if (!action || !qq) {
+      return `用法：${config.commandName}.blacklist add <QQ号> 或 ${config.commandName}.blacklist remove <QQ号>`
+    }
+    const qqStr = String(qq).trim()
+    if (!/^\d+$/.test(qqStr)) {
+      return '请输入有效的QQ号。'
+    }
+
+    if (action === 'add') {
+      if (blacklistSet.has(qqStr)) {
+        return `用户 ${qqStr} 已在黑名单中。`
+      }
+      try {
+        await ctx.database.create('wenku8_blacklist', { userId: qqStr })
+        blacklistSet.add(qqStr)
+        logger.info(`管理员 ${session.userId} 将用户 ${qqStr} 加入黑名单`)
+        return `已将用户 ${qqStr} 加入黑名单（已持久化）。`
+      } catch (e) {
+        logger.warn('数据库写入黑名单失败:', e)
+        return '操作失败，请检查数据库状态。'
+      }
+    }
+
+    if (action === 'remove') {
+      if (!blacklistSet.has(qqStr)) {
+        return `用户 ${qqStr} 不在黑名单中。`
+      }
+      try {
+        await ctx.database.remove('wenku8_blacklist', { userId: qqStr })
+        blacklistSet.delete(qqStr)
+        logger.info(`管理员 ${session.userId} 将用户 ${qqStr} 移出黑名单`)
+        return `已将用户 ${qqStr} 移出黑名单（已持久化）。`
+      } catch (e) {
+        logger.warn('数据库移除黑名单失败:', e)
+        return '操作失败，请检查数据库状态。'
+      }
+    }
+
+    return `未知操作「${action}」。可用操作：add、remove`
+  })
+
+  // ==================== 管理员指令：黑名单列表 ====================
+
+  const blacklistListCmd = ctx.command(`${config.commandName}.blacklist.list`, '查看黑名单列表（管理员）')
+    .usage(`用法：${config.commandName}.blacklist.list`)
+    .example(`${config.commandName}.blacklist.list`)
+
+  blacklistListCmd.action(async ({ session }) => {
+    if (!session) return '会话异常，请重试。'
+    if (!config.adminQQ || String(session.userId) !== String(config.adminQQ)) {
+      return '你没有权限执行此操作。'
+    }
+    if (blacklistSet.size === 0) {
+      return '当前黑名单为空。'
+    }
+    const list = Array.from(blacklistSet).join('\n')
+    return `当前黑名单用户（共 ${blacklistSet.size} 人）：\n${list}`
   })
 }
-
 
