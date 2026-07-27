@@ -1,4 +1,5 @@
 # koishi-plugin-litenoveldownload-wenku8
+- 请使用最新稳定版本0.1.4
 
 - 本插件基于www.wenku8.net网站提供下载服务，请在使用前前往注册账号
 - 要求回复和一对一两个配置项按需开启或关闭

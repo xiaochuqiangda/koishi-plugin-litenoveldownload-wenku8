@@ -29,7 +29,6 @@ export interface Config {
   useForward: boolean
   maxCache: number
   oneToOne: boolean
-  requireReply: boolean
   adminQQ: string
 }
 
@@ -48,7 +47,6 @@ export const Config: Schema<Config> = Schema.object({
   useForward: Schema.boolean().default(false).description('是否使用合并转发消息展示搜索结果'),
   maxCache: Schema.number().default(5).description('缓存文件数量上限'),
   oneToOne: Schema.boolean().default(true).description('一对一模式：仅搜索发起者可操作。关闭后任何人都能操作你的搜索结果'),
-  requireReply: Schema.boolean().default(false).description('要求回复机器人消息：开启后用户需引用（回复）机器人的搜索结果才能操作。建议配合一对一使用'),
   adminQQ: Schema.string().default('').description('管理员QQ号，只有管理员可以使用黑名单管理指令'),
 })
 
@@ -469,23 +467,12 @@ export async function apply(ctx: Context, config: Config) {
     while (true) {
       let input: string | undefined
 
-      if (config.oneToOne && !config.requireReply) {
-        // 一对一 + 不要求回复：只监听发起者，不吞其他人消息
+      if (config.oneToOne) {
+        // 一对一模式：只监听发起者
         input = await session.prompt(config.timeout * 1000)
       } else {
-        // 其他情况：全频道监听（会拦截该频道所有消息直到匹配或超时）
-        const replySession = await session.prompt((sess: any) => {
-          // 一对一：过滤非发起者
-          if (config.oneToOne && sess.userId !== session.userId) return false
-          // 要求回复：过滤非回复机器人消息
-          if (config.requireReply) {
-            if (!sess.quote) return false
-            const quotedUserId = sess.quote.userId ?? sess.quote.author?.id
-            if (String(quotedUserId) !== String(session.bot.selfId)) return false
-          }
-          return true
-        }, config.timeout * 1000)
-        input = replySession?.content
+        // 非一对一：全频道监听（会拦截该频道所有消息直到匹配或超时）
+        input = await session.prompt(config.timeout * 1000)
       }
 
       if (input === undefined) {
@@ -555,11 +542,7 @@ export async function apply(ctx: Context, config: Config) {
         continue
       }
 
-      if (config.requireReply) {
-        await session.send('无效指令，请回复「下载+序号」「下一页」「上一页」或「取消」。\n注意：需要先引用（回复）机器人的消息再发送指令。')
-      } else {
-        await session.send('无效指令，请回复「下载+序号」「下一页」「上一页」或「取消」。')
-      }
+      await session.send('无效指令，请回复「下载+序号」「下一页」「上一页」或「取消」。')
     }
   }
   
