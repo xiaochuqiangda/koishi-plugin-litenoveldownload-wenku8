@@ -161,6 +161,10 @@ export async function apply(ctx: Context, config: Config) {
     return html.includes('width:373px;height:136px;float:left')
   }
 
+  function isSugoiPage(html: string): boolean {
+    return html.includes('这本轻小说真厉害') && html.includes('zt/sugoi')
+  }
+
   function parseListPage(html: string): { books: BookInfo[]; currentPage: number; totalPage: number } {
     const $ = load(html)
     const books: BookInfo[] = []
@@ -225,7 +229,53 @@ export async function apply(ctx: Context, config: Config) {
     return { id, title, author, category, tags, status, available: true, detailUrl: `https://www.wenku8.net/book/${id}.htm` }
   }
 
-  async function fetchBooks(searchType: 'title' | 'tag' | 'list', keyword: string, sort: string, page: number) {
+  function parseSugoiPage(html: string): { bunko: BookInfo[]; tanko: BookInfo[] } {
+    const $ = load(html)
+    const bunko: BookInfo[] = []
+    const tanko: BookInfo[] = []
+
+    $('table.grid').each((_idx: number, table: any) => {
+      const $table = $(table)
+      const caption = $table.find('caption').text()
+      if (caption.includes('文库部门')) {
+        $table.find('a[href^="/book/"]').each((_i: number, el: any) => {
+          const $a = $(el)
+          const href = $a.attr('href') || ''
+          const idMatch = href.match(/\/book\/(\d+)\.htm/)
+          const id = idMatch ? idMatch[1] : ''
+          const title = $a.attr('title') || $a.text().trim()
+          if (id && title && !bunko.find(b => b.id === id)) {
+            bunko.push({
+              id, title,
+              author: '', category: '', tags: '', status: '',
+              available: true,
+              detailUrl: `https://www.wenku8.net${href}`
+            })
+          }
+        })
+      } else if (caption.includes('单行本部门')) {
+        $table.find('a[href^="/book/"]').each((_i: number, el: any) => {
+          const $a = $(el)
+          const href = $a.attr('href') || ''
+          const idMatch = href.match(/\/book\/(\d+)\.htm/)
+          const id = idMatch ? idMatch[1] : ''
+          const title = $a.attr('title') || $a.text().trim()
+          if (id && title && !tanko.find(b => b.id === id)) {
+            tanko.push({
+              id, title,
+              author: '', category: '', tags: '', status: '',
+              available: true,
+              detailUrl: `https://www.wenku8.net${href}`
+            })
+          }
+        })
+      }
+    })
+
+    return { bunko, tanko }
+  }
+
+  async function fetchBooks(searchType: 'title' | 'tag' | 'list' | 'sugoi', keyword: string, sort: string, page: number) {
     let url = ''
     if (searchType === 'title') {
       url = `https://www.wenku8.net/modules/article/search.php?searchtype=articlename&searchkey=${gbkEncode(keyword)}&page=${page}`
@@ -235,11 +285,17 @@ export async function apply(ctx: Context, config: Config) {
       url = sort === 'fullflag'
         ? `https://www.wenku8.net/modules/article/articlelist.php?fullflag=1&page=${page}`
         : `https://www.wenku8.net/modules/article/toplist.php?sort=${sort}&page=${page}`
+    } else if (searchType === 'sugoi') {
+      url = `https://www.wenku8.net/zt/sugoi/${keyword}.php`
     }
     try {
       const html = await request(url)
       let books: BookInfo[] = [], currentPage = page, totalPage = 1
-      if (isDetailPage(html)) {
+      if (searchType === 'sugoi') {
+        const r = parseSugoiPage(html)
+        books = [...r.bunko, ...r.tanko]
+        return { books, currentPage: 1, totalPage: 1, bunkoCount: r.bunko.length }
+      } else if (isDetailPage(html)) {
         const book = parseDetailPage(html)
         if (book.id) books = [book]
       } else if (isListPage(html)) {
@@ -258,10 +314,34 @@ export async function apply(ctx: Context, config: Config) {
 
   function buildBookText(book: BookInfo, index: number): string {
     const flag = book.available ? '' : ' [无法下载]'
-    return `[${index + 1}] 《${book.title}》${flag}\n作者：${book.author || '未知'} | 分类：${book.category || '未知'}\nTags：${book.tags || '无'} | 状态：${book.status || '未知'}`
+    let text = `[${index + 1}] 《${book.title}》${flag}`
+    if (book.author || book.category || book.tags || book.status) {
+      text += `\n作者：${book.author || '未知'} | 分类：${book.category || '未知'}`
+      text += `\nTags：${book.tags || '无'} | 状态：${book.status || '未知'}`
+    }
+    return text
   }
 
-  function formatResultText(books: BookInfo[], currentPage: number, totalPage: number, searchType: string, sort: string): string {
+  function formatResultText(books: BookInfo[], currentPage: number, totalPage: number, searchType: string, sort: string, bunkoCount?: number): string {
+    if (searchType === 'sugoi') {
+      const bc = bunkoCount ?? 10
+      let msg = `「这本轻小说真厉害！」${sort}年榜单\n`
+      if (bc > 0) {
+        msg += `\n📚 文库部门 TOP${bc}\n`
+        msg += '━━━━━━━━━━━━━━\n'
+        books.slice(0, bc).forEach((book, i) => { msg += buildBookText(book, i) + '\n\n' })
+      }
+      if (books.length > bc) {
+        msg += `📖 单行本部门 TOP${books.length - bc}\n`
+        msg += '━━━━━━━━━━━━━━\n'
+        books.slice(bc).forEach((book, i) => { msg += buildBookText(book, bc + i) + (i < books.length - bc - 1 ? '\n\n' : '\n') })
+      }
+      msg += '━━━━━━━━━━━━━━\n'
+      msg += '回复「下载+序号」下载对应书籍\n'
+      msg += '回复「取消」退出搜索'
+      return msg
+    }
+
     let msg = `第 ${currentPage}/${totalPage} 页\n`
     if (searchType === 'list') {
       const sortNames: Record<string, string> = { lastupdate: '按更新查看', allvisit: '按热门查看', fullflag: '只看完结', anime: '只看动画化' }
@@ -273,38 +353,50 @@ export async function apply(ctx: Context, config: Config) {
     msg += '回复「下载+序号」下载对应书籍\n'
     if (currentPage < totalPage) msg += '回复「下一页」查看下一页\n'
     if (currentPage > 1) msg += '回复「上一页」查看上一页\n'
-    msg += `回复「页数X」跳转至第X页（1~${totalPage}）
-`
+    msg += `回复「页数X」跳转至第X页（1~${totalPage}）\n`
     msg += '回复「取消」退出搜索'
     return msg
   }
 
-  async function sendResults(session: any, books: BookInfo[], currentPage: number, totalPage: number, searchType: string, sort: string) {
+  async function sendResults(session: any, books: BookInfo[], currentPage: number, totalPage: number, searchType: string, sort: string, bunkoCount?: number) {
     if (!config.useForward) {
-      await session.send(formatResultText(books, currentPage, totalPage, searchType, sort))
+      await session.send(formatResultText(books, currentPage, totalPage, searchType, sort, bunkoCount))
       return
     }
     const texts: string[] = []
-    let header = `第 ${currentPage}/${totalPage} 页`
-    if (searchType === 'list') {
-      const sortNames: Record<string, string> = { lastupdate: '按更新查看', allvisit: '按热门查看', fullflag: '只看完结', anime: '只看动画化' }
-      header += `\n排序：${sortNames[sort] || sort}`
+    if (searchType === 'sugoi') {
+      const bc = bunkoCount ?? 10
+      texts.push(`「这本轻小说真厉害！」${sort}年榜单`)
+      if (bc > 0) {
+        texts.push(`📚 文库部门 TOP${bc}`)
+        books.slice(0, bc).forEach((book, i) => texts.push(buildBookText(book, i)))
+      }
+      if (books.length > bc) {
+        texts.push(`📖 单行本部门 TOP${books.length - bc}`)
+        books.slice(bc).forEach((book, i) => texts.push(buildBookText(book, bc + i)))
+      }
+      texts.push('回复「下载+序号」下载对应书籍\n回复「取消」退出搜索')
+    } else {
+      let header = `第 ${currentPage}/${totalPage} 页`
+      if (searchType === 'list') {
+        const sortNames: Record<string, string> = { lastupdate: '按更新查看', allvisit: '按热门查看', fullflag: '只看完结', anime: '只看动画化' }
+        header += `\n排序：${sortNames[sort] || sort}`
+      }
+      texts.push(header)
+      books.forEach((book, i) => texts.push(buildBookText(book, i)))
+      let tip = '回复「下载+序号」下载对应书籍\n'
+      if (currentPage < totalPage) tip += '回复「下一页」查看下一页\n'
+      if (currentPage > 1) tip += '回复「上一页」查看上一页\n'
+      tip += `回复「页数X」跳转至第X页（1~${totalPage}）\n`
+      tip += '回复「取消」退出搜索'
+      texts.push(tip)
     }
-    texts.push(header)
-    books.forEach((book, i) => texts.push(buildBookText(book, i)))
-    let tip = '回复「下载+序号」下载对应书籍\n'
-    if (currentPage < totalPage) tip += '回复「下一页」查看下一页\n'
-    if (currentPage > 1) tip += '回复「上一页」查看上一页\n'
-    tip += `回复「页数X」跳转至第X页（1~${totalPage}）
-`
-    tip += '回复「取消」退出搜索'
-    texts.push(tip)
 
     try {
       await sendForward(session, texts)
     } catch (e) {
       logger.warn('合并转发发送失败，回退到普通文本:', e)
-      await session.send(formatResultText(books, currentPage, totalPage, searchType, sort))
+      await session.send(formatResultText(books, currentPage, totalPage, searchType, sort, bunkoCount))
     }
   }
 
@@ -390,7 +482,7 @@ export async function apply(ctx: Context, config: Config) {
 
   // ==================== 下载（修复版）====================
 
-    async function doDownload(session: any, book: BookInfo): Promise<string> {
+  async function doDownload(session: any, book: BookInfo): Promise<string> {
     if (!book.available) {
       return '无书源：该书因版权问题已下架，无法下载。\n您可以继续选择其他书籍下载或取消等待。'
     }
@@ -446,10 +538,11 @@ export async function apply(ctx: Context, config: Config) {
 
   // ==================== 交互循环 ====================
 
-    async function interact(session: any, searchType: 'title' | 'tag' | 'list', keyword: string, sort: string, page: number) {
+  async function interact(session: any, searchType: 'title' | 'tag' | 'list' | 'sugoi', keyword: string, sort: string, page: number) {
     let currentPage = page
     let totalPage = 1
     let books: BookInfo[] = []
+    let bunkoCount: number | undefined = undefined
 
     // 首次搜索
     const first = await fetchBooks(searchType, keyword, sort, currentPage)
@@ -460,10 +553,13 @@ export async function apply(ctx: Context, config: Config) {
     books = first.books
     currentPage = first.currentPage
     totalPage = first.totalPage
-    await sendResults(session, books, currentPage, totalPage, searchType, sort)
+    if ('bunkoCount' in first) {
+      bunkoCount = first.bunkoCount
+    }
+
+    await sendResults(session, books, currentPage, totalPage, searchType, sort, bunkoCount)
 
     // prompt 交互循环
-        // prompt 交互循环
     while (true) {
       let input: string | undefined
 
@@ -494,7 +590,8 @@ export async function apply(ctx: Context, config: Config) {
         const result = await fetchBooks(searchType, keyword, sort, currentPage + 1)
         if (typeof result === 'string') { await session.send(result); return }
         books = result.books; currentPage = result.currentPage; totalPage = result.totalPage
-        await sendResults(session, books, currentPage, totalPage, searchType, sort)
+        if ('bunkoCount' in result) bunkoCount = result.bunkoCount
+        await sendResults(session, books, currentPage, totalPage, searchType, sort, bunkoCount)
         continue
       }
 
@@ -506,7 +603,8 @@ export async function apply(ctx: Context, config: Config) {
         const result = await fetchBooks(searchType, keyword, sort, currentPage - 1)
         if (typeof result === 'string') { await session.send(result); return }
         books = result.books; currentPage = result.currentPage; totalPage = result.totalPage
-        await sendResults(session, books, currentPage, totalPage, searchType, sort)
+        if ('bunkoCount' in result) bunkoCount = result.bunkoCount
+        await sendResults(session, books, currentPage, totalPage, searchType, sort, bunkoCount)
         continue
       }
 
@@ -525,7 +623,8 @@ export async function apply(ctx: Context, config: Config) {
         const result = await fetchBooks(searchType, keyword, sort, targetPage)
         if (typeof result === 'string') { await session.send(result); return }
         books = result.books; currentPage = result.currentPage; totalPage = result.totalPage
-        await sendResults(session, books, currentPage, totalPage, searchType, sort)
+        if ('bunkoCount' in result) bunkoCount = result.bunkoCount
+        await sendResults(session, books, currentPage, totalPage, searchType, sort, bunkoCount)
         continue
       }
 
@@ -545,7 +644,7 @@ export async function apply(ctx: Context, config: Config) {
       await session.send('无效指令，请回复「下载+序号」「下一页」「上一页」或「取消」。')
     }
   }
-  
+
   // ==================== 指令注册 ====================
 
   const cmd = ctx.command(`${config.commandName} [...rest]`, '轻小说文库搜索与下载')
@@ -571,7 +670,9 @@ ${config.commandName} list — 按默认排序浏览`)
       return `请输入搜索内容。用法：
 ${config.commandName} <关键词> [更新|热门|完结|动画化] — 按标题搜索
 ${config.commandName} tag <标签> [更新|热门|完结|动画化] — 按标签搜索
-${config.commandName} list [更新|热门|完结|动画化] — 按默认排序浏览`
+${config.commandName} list [更新|热门|完结|动画化] — 按默认排序浏览
+${config.commandName} 轻厉<年份> — 查看「这本轻小说真厉害！」榜单
+${config.commandName}.tag — 查看所有可用Tags`
     }
 
     if (!(await ensureLogin())) {
@@ -596,10 +697,26 @@ ${config.commandName} list [更新|热门|完结|动画化] — 按默认排序�
       return { keyword: input, sort: config.defaultSort }
     }
 
-    if (rawInput.startsWith('tag ')) {
-      const afterTag = rawInput.slice(4).trim()
+    if (rawInput === 'tag' || rawInput.startsWith('tag ')) {
+      const afterTag = rawInput === 'tag' ? '' : rawInput.slice(4).trim()
       const { keyword, sort } = parseInput(afterTag)
-      if (!keyword) return '请输入标签名。'
+      if (!keyword) {
+        // 显示所有可用标签
+        const tagList = `📋 可用Tags列表
+
+🌸 日常系：校园、青春、恋爱、治愈、群像、竞技、音乐、美食、旅行、欢乐向、经营、职场、斗智、脑洞、宅文化
+
+⚔️ 幻想系：穿越、奇幻、魔法、异能、战斗、科幻、机战、战争、冒险、龙傲天
+
+🖤 黑深残：悬疑、犯罪、复仇、黑暗、猎奇、惊悚、间谍、末日、游戏、大逃杀
+
+👤 人物类：青梅竹马、妹妹、女儿、JK、JC、大小姐、性转、伪娘、人外
+
+💕 特殊类：后宫、百合、耽美、NTR、女性视角
+
+💡 用法：${config.commandName} tag (标签名) [更新|热门|完结|动画化]`
+        return tagList
+      }
       await interact(session, 'tag', keyword, sort, 1)
       return
     }
@@ -611,10 +728,53 @@ ${config.commandName} list [更新|热门|完结|动画化] — 按默认排序�
       return
     }
 
+    // 轻厉榜单：wenku8 轻厉2025 或 wenku8 轻厉 2025
+    const sugoiMatch = rawInput.match(/^轻厉\s*(\d{4})$/)
+    if (sugoiMatch) {
+      await interact(session, 'sugoi', sugoiMatch[1], '', 1)
+      return
+    }
+
     const { keyword, sort } = parseInput(rawInput)
     await interact(session, 'title', keyword, sort, 1)
   })
 
+  // ==================== Tags 列表指令 ====================
+
+  const tagListCmd = ctx.command(`${config.commandName}.tag`, '查看所有可用Tags')
+    .usage(`用法：${config.commandName}.tag`)
+    .example(`${config.commandName}.tag`)
+
+  tagListCmd.action(async ({ session }) => {
+    if (!session) return '会话异常，请重试。'
+
+    // 黑名单检查
+    if (blacklistSet.has(String(session.userId))) {
+      return '你已被列入黑名单，无法使用此插件。'
+    }
+
+    const tags = `【日常系属性Tags】
+校园、青春、恋爱、治愈、群像
+竞技、音乐、美食、旅行、欢乐向
+经营、职场、斗智、脑洞、宅文化
+
+【幻想系属性Tags】
+穿越、奇幻、魔法、异能、战斗
+科幻、机战、战争、冒险、龙傲天
+
+【黑深残属性Tags】
+悬疑、犯罪、复仇、黑暗、猎奇
+惊悚、间谍、末日、游戏、大逃杀
+
+【人物属性类Tags】
+青梅竹马、妹妹、女儿、JK、JC
+大小姐、性转、伪娘、人外
+
+【特殊属性类Tags】
+后宫、百合、耽美、NTR、女性视角`
+
+    return tags
+  })
 
   // ==================== 管理员指令：黑名单管理 ====================
 
