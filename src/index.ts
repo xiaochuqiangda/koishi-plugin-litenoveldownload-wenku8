@@ -269,6 +269,23 @@ export async function apply(ctx: Context, config: Config) {
             })
           }
         })
+      } else if (caption.includes('这本轻小说真厉害')) {
+        // 2016 及之前：没有分部门，统一放入 bunko
+        $table.find('a[href^="/book/"]').each((_i: number, el: any) => {
+          const $a = $(el)
+          const href = $a.attr('href') || ''
+          const idMatch = href.match(/\/book\/(\d+)\.htm/)
+          const id = idMatch ? idMatch[1] : ''
+          const title = $a.attr('title') || $a.text().trim()
+          if (id && title && !bunko.find(b => b.id === id)) {
+            bunko.push({
+              id, title,
+              author: '', category: '', tags: '', status: '',
+              available: true,
+              detailUrl: `https://www.wenku8.net${href}`
+            })
+          }
+        })
       }
     })
 
@@ -678,10 +695,10 @@ ${config.commandName} list — 按默认排序浏览`)
 
     if (!rawInput) {
       return `请输入搜索内容。用法：
-${config.commandName} <关键词> — 按标题搜索
-${config.commandName} tag <标签> [更新|热门|完结|动画化] — 按标签搜索
+${config.commandName} 关键词 — 按标题搜索
+${config.commandName} tag 标签 [更新|热门|完结|动画化] — 按标签搜索
 ${config.commandName} list [更新|热门|完结|动画化] — 按默认排序浏览
-${config.commandName} 轻厉<年份> — 查看「这本轻小说真厉害！」榜单
+${config.commandName} 轻厉20XX — 查看「这本轻小说真厉害！」历年榜单
 ${config.commandName}.tag — 查看所有可用Tags`
     }
 
