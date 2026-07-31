@@ -281,10 +281,13 @@ export async function apply(ctx: Context, config: Config) {
       url = `https://www.wenku8.net/modules/article/search.php?searchtype=articlename&searchkey=${gbkEncode(keyword)}&page=${page}`
     } else if (searchType === 'tag') {
       let baseUrl = `https://www.wenku8.net/modules/article/tags.php?t=${gbkEncode(keyword)}`
-      if (sort === 'fullflag') {
-        url = `${baseUrl}&fullflag=1&page=${page}`
-      } else if (sort && sort !== 'lastupdate') {
-        url = `${baseUrl}&sort=${sort}&page=${page}`
+      const vMap: Record<string, string> = {
+        'allvisit': '1',
+        'fullflag': '2',
+        'anime': '3',
+      }
+      if (vMap[sort]) {
+        url = `${baseUrl}&v=${vMap[sort]}&page=${page}`
       } else {
         url = `${baseUrl}&page=${page}`
       }
