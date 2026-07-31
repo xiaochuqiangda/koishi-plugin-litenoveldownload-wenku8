@@ -280,7 +280,14 @@ export async function apply(ctx: Context, config: Config) {
     if (searchType === 'title') {
       url = `https://www.wenku8.net/modules/article/search.php?searchtype=articlename&searchkey=${gbkEncode(keyword)}&page=${page}`
     } else if (searchType === 'tag') {
-      url = `https://www.wenku8.net/modules/article/tags.php?t=${gbkEncode(keyword)}&page=${page}`
+      let baseUrl = `https://www.wenku8.net/modules/article/tags.php?t=${gbkEncode(keyword)}`
+      if (sort === 'fullflag') {
+        url = `${baseUrl}&fullflag=1&page=${page}`
+      } else if (sort && sort !== 'lastupdate') {
+        url = `${baseUrl}&sort=${sort}&page=${page}`
+      } else {
+        url = `${baseUrl}&page=${page}`
+      }
     } else if (searchType === 'list') {
       url = sort === 'fullflag'
         ? `https://www.wenku8.net/modules/article/articlelist.php?fullflag=1&page=${page}`
@@ -668,7 +675,7 @@ ${config.commandName} list — 按默认排序浏览`)
 
     if (!rawInput) {
       return `请输入搜索内容。用法：
-${config.commandName} <关键词> [更新|热门|完结|动画化] — 按标题搜索
+${config.commandName} <关键词> — 按标题搜索
 ${config.commandName} tag <标签> [更新|热门|完结|动画化] — 按标签搜索
 ${config.commandName} list [更新|热门|完结|动画化] — 按默认排序浏览
 ${config.commandName} 轻厉<年份> — 查看「这本轻小说真厉害！」榜单
@@ -714,7 +721,7 @@ ${config.commandName}.tag — 查看所有可用Tags`
 
 💕 特殊类：后宫、百合、耽美、NTR、女性视角
 
-💡 用法：${config.commandName} tag (标签名) [更新|热门|完结|动画化]`
+💡 用法：${config.commandName} tag <标签名> [更新|热门|完结|动画化]`
         return tagList
       }
       await interact(session, 'tag', keyword, sort, 1)
@@ -735,9 +742,10 @@ ${config.commandName}.tag — 查看所有可用Tags`
       return
     }
 
-    const { keyword, sort } = parseInput(rawInput)
-    await interact(session, 'title', keyword, sort, 1)
+    // 标题搜索：整句作为关键词，不参与排序解析
+    await interact(session, 'title', rawInput, config.defaultSort, 1)
   })
+
 
   // ==================== Tags 列表指令 ====================
 
